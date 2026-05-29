@@ -1,0 +1,20 @@
+services:
+  youtube-audio-downloader:
+    image: python:3.12-slim
+    container_name: youtube-audio-downloader
+    ports:
+      - "7777:8080"
+    volumes:
+      - ./app:/app
+      - /Volumes/T7/Media/AudioBooks:/downloads
+    working_dir: /app
+    environment:
+      DOWNLOAD_DIR: /downloads
+      DEFAULT_AUDIO_FORMAT: mp3
+      DEFAULT_AUDIO_QUALITY: "5"
+      # Optional: set this when yt-dlp needs a proxy, for example ClashX.
+      YTDLP_PROXY: http://host.docker.internal:7890
+      # Optional: set this and send Authorization: Bearer <token>
+      # API_TOKEN: change-me
+    command: sh -c "apt update && apt install -y ffmpeg && pip install -r requirements.txt && python app.py"
+    restart: unless-stopped
