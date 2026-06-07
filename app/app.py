@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib import error as urlerror
+from urllib import parse, request as urlrequest
 
 from flask import Flask, jsonify, request
 from yt_dlp import YoutubeDL
@@ -19,6 +21,9 @@ DEFAULT_AUDIO_QUALITY = os.getenv("DEFAULT_AUDIO_QUALITY", "0")
 API_TOKEN = os.getenv("API_TOKEN")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))
 YTDLP_PROXY = os.getenv("YTDLP_PROXY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY") or YTDLP_PROXY
 
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 jobs: dict[str, dict[str, Any]] = {}
@@ -59,6 +64,44 @@ def sanitize_subfolder(value: str | None) -> str | None:
 
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", value).strip(" .-/")
     return cleaned or None
+
+
+def telegram_enabled() -> bool:
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def send_telegram_message(text: str) -> dict[str, Any]:
+    if not telegram_enabled():
+        return {"enabled": False}
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = parse.urlencode(
+        {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+
+    opener = urlrequest.build_opener()
+    if TELEGRAM_PROXY:
+        opener = urlrequest.build_opener(
+            urlrequest.ProxyHandler(
+                {
+                    "http": TELEGRAM_PROXY,
+                    "https": TELEGRAM_PROXY,
+                }
+            )
+        )
+
+    req = urlrequest.Request(api_url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+    try:
+        with opener.open(req, timeout=15) as resp:
+            return {"enabled": True, "status": resp.status}
+    except urlerror.URLError as exc:
+        return {"enabled": True, "error": str(exc)}
 
 
 def progress_hook(job_id: str):
@@ -152,11 +195,16 @@ def run_download(job_id: str, payload: dict[str, Any]) -> None:
             title = None
             webpage_url = url
 
+        telegram_result = send_telegram_message(
+            f"Media saved to Jellyfin: {title or webpage_url}"
+        )
+
         update_job(
             job_id,
             status="completed",
             title=title,
             url=webpage_url,
+            telegram=telegram_result,
             completed_at=utc_now(),
             progress="100%",
         )
@@ -228,6 +276,13 @@ def get_job(job_id: str):
     if not job:
         return jsonify({"error": "Job not found."}), 404
     return jsonify(job)
+
+
+@app.post("/telegram/test")
+def telegram_test():
+    result = send_telegram_message("YouTube Audio Downloader Telegram notifications are working.")
+    status = 200 if result.get("enabled") and not result.get("error") else 400
+    return jsonify(result), status
 
 
 if __name__ == "__main__":

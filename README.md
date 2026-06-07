@@ -47,6 +47,27 @@ If the container can reach YouTube directly, remove or comment out `YTDLP_PROXY`
 
 When using ClashX, make sure it is running and that its HTTP or mixed proxy port is `7890`. If your ClashX port is different, update the proxy URLs in `docker-compose.yml`.
 
+## Telegram Notifications
+
+Telegram notifications are optional. Set these environment variables in `docker-compose.yml` to send `Media saved to Jellyfin: {title}` after media is saved:
+
+```yaml
+TELEGRAM_BOT_TOKEN: "123456:your-bot-token"
+TELEGRAM_CHAT_ID: "123456789"
+```
+
+If Telegram needs a proxy, set `TELEGRAM_PROXY`. When `TELEGRAM_PROXY` is omitted, the app reuses `YTDLP_PROXY` if it is set.
+
+```yaml
+TELEGRAM_PROXY: http://host.docker.internal:7890
+```
+
+Test Telegram from the running server:
+
+```bash
+curl -X POST http://localhost:7777/telegram/test
+```
+
 ## Download Audio
 
 ```bash
@@ -107,6 +128,7 @@ To download video instead of audio:
 - `POST /download`
 - `GET /jobs`
 - `GET /jobs/<job_id>`
+- `POST /telegram/test`
 
 Downloads are stored under:
 
