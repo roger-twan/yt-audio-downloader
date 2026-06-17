@@ -1,0 +1,32 @@
+services:
+  youtube-audio-downloader:
+    image: python:3.12-slim
+    container_name: youtube-audio-downloader
+    ports:
+      - "7777:8080"
+    volumes:
+      - ./app:/app
+      - /path/to/audiobooks:/downloads/audiobooks
+      - /path/to/songs-inbox:/downloads/songs-inbox
+      - /path/to/songs:/downloads/songs
+    working_dir: /app
+    environment:
+      AUDIOBOOK_DOWNLOAD_DIR: /downloads/audiobooks
+      SONG_INBOX_DIR: /downloads/songs-inbox
+      SONG_DOWNLOAD_DIR: /downloads/songs
+      AUDIO_FORMAT: mp3
+      AUDIO_QUALITY: "5"
+      SONG_QUALITY: "0"
+      # Optional post-review commands. Use {path} as the downloaded file path.
+      # BEETS_COMMAND: beet import -q {path}
+      # LRCGET_COMMAND: lrcget {path}
+      # Optional: set this when yt-dlp needs a proxy, for example ClashX.
+      # YTDLP_PROXY: http://host.docker.internal:7890
+      # Optional: send a Telegram message after media is saved.
+      # TELEGRAM_BOT_TOKEN: your-telegram-bot-token
+      # TELEGRAM_CHAT_ID: your-telegram-chat-id
+      # Optional: defaults to YTDLP_PROXY when omitted.
+      # TELEGRAM_PROXY: http://host.docker.internal:7890
+      API_TOKEN: change-me
+    command: sh -c "apt update && apt install -y ffmpeg && pip install -r requirements.txt && python app.py"
+    restart: unless-stopped
