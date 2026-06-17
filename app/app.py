@@ -58,12 +58,15 @@ def read_job(job_id: str) -> dict[str, Any] | None:
         return dict(job) if job else None
 
 
-def sanitize_subfolder(value: str | None) -> str | None:
-    if not value:
+def sanitize_title(value: Any) -> str | None:
+    if not isinstance(value, str):
         return None
 
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", value).strip(" .-/")
-    return cleaned or None
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "-", value).strip(" .-")
+    if not cleaned:
+        return None
+
+    return cleaned[:120]
 
 
 def telegram_enabled() -> bool:
@@ -135,19 +138,30 @@ def build_ydl_options(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     playlist = bool(payload.get("playlist", False))
     audio_format = str(payload.get("audio_format") or DEFAULT_AUDIO_FORMAT)
     audio_quality = str(payload.get("audio_quality") or DEFAULT_AUDIO_QUALITY)
-    subfolder = sanitize_subfolder(payload.get("subfolder"))
+    custom_title = sanitize_title(payload.get("title"))
+    title_template = (
+        custom_title.replace("%", "%%")
+        if custom_title
+        else "%(title).80B"
+    )
 
-    target_dir = DOWNLOAD_DIR / subfolder if subfolder else DOWNLOAD_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     options: dict[str, Any] = {
-        "outtmpl": str(target_dir / "%(title).80B.%(ext)s"),
+        "outtmpl": str(DOWNLOAD_DIR / f"%(artist,uploader)s - {title_template}.%(ext)s"),
         "noplaylist": not playlist,
         "restrictfilenames": False,
         "windowsfilenames": True,
         "ignoreerrors": False,
         "progress_hooks": [progress_hook(job_id)],
+        "postprocessor_args": {
+            "FFmpegMetadata": ["-metadata", "album=Audiobooks"],
+        },
     }
+    if custom_title:
+        options["postprocessor_args"]["FFmpegMetadata"].extend(
+            ["-metadata", f"title={custom_title}"]
+        )
 
     proxy = payload.get("proxy") or YTDLP_PROXY
     if proxy:
@@ -184,26 +198,29 @@ def run_download(job_id: str, payload: dict[str, Any]) -> None:
     update_job(job_id, status="starting")
 
     try:
+        custom_title = sanitize_title(payload.get("title"))
         options = build_ydl_options(job_id, payload)
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
 
         if isinstance(info, dict):
-            title = info.get("title")
+            source_title = info.get("title")
+            title = custom_title or source_title
             webpage_url = info.get("webpage_url") or url
         else:
-            title = None
+            source_title = None
+            title = custom_title
             webpage_url = url
 
-        telegram_result = send_telegram_message(
-            f"Media saved to Jellyfin: {title or webpage_url}"
-        )
+        telegram_result = send_telegram_message(f"Audio saved: {title or webpage_url}")
 
         update_job(
             job_id,
             status="completed",
             title=title,
+            source_title=source_title,
             url=webpage_url,
+            download_dir=str(DOWNLOAD_DIR),
             telegram=telegram_result,
             completed_at=utc_now(),
             progress="100%",
@@ -247,6 +264,7 @@ def download():
             "created_at": now,
             "updated_at": now,
             "audio_only": bool(payload.get("audio_only", True)),
+            "title": sanitize_title(payload.get("title")),
         }
 
     executor.submit(run_download, job_id, {**payload, "url": url.strip()})

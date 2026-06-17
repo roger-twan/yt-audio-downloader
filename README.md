@@ -4,7 +4,13 @@ A small Dockerized Flask API that accepts YouTube URLs and downloads them with `
 
 ## Configure
 
-Edit `docker-compose.yml` and replace:
+Create your local Docker Compose file from the template:
+
+```bash
+cp docker-compose.template.yml docker-compose.yml
+```
+
+Then edit `docker-compose.yml` and replace:
 
 ```yaml
 - /path/to/audio:/downloads
@@ -49,7 +55,7 @@ When using ClashX, make sure it is running and that its HTTP or mixed proxy port
 
 ## Telegram Notifications
 
-Telegram notifications are optional. Set these environment variables in `docker-compose.yml` to send `Media saved to Jellyfin: {title}` after media is saved:
+Telegram notifications are optional. Set these environment variables in `docker-compose.yml` to send a message after media is saved:
 
 ```yaml
 TELEGRAM_BOT_TOKEN: "123456:your-bot-token"
@@ -103,13 +109,16 @@ curl http://localhost:7777/jobs
 ```json
 {
   "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "title": "Custom title",
   "audio_only": true,
   "audio_format": "mp3",
   "audio_quality": "5",
-  "playlist": false,
-  "subfolder": "YouTube"
+  "playlist": false
 }
 ```
+
+When `title` is set, it replaces the title part of the saved filename and the file metadata title.
+The file metadata album is always set to `Audiobooks`.
 
 To download video instead of audio:
 
@@ -133,5 +142,5 @@ To download video instead of audio:
 Downloads are stored under:
 
 ```text
-/downloads/<artist or uploader>/<title>.<format>
+/downloads/<artist or uploader> - <title>.<format>
 ```
