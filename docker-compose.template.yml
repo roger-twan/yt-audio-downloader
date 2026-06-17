@@ -7,6 +7,8 @@ services:
     volumes:
       - ./app:/app
       - /path/to/audio:/downloads
+      # Optional: allow triggering commands in other Docker containers.
+      # - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     environment:
       DOWNLOAD_DIR: /downloads
@@ -21,5 +23,8 @@ services:
       # TELEGRAM_PROXY: http://host.docker.internal:7890
       # Optional: set this and send Authorization: Bearer <token>
       # API_TOKEN: change-me
+      # Optional: run a command in another Docker container after each download.
+      # POST_DOWNLOAD_DOCKER_CONTAINER: navidrome
+      # POST_DOWNLOAD_DOCKER_COMMAND: navidrome scan
     command: sh -c "apt update && apt install -y ffmpeg && pip install -r requirements.txt && python app.py"
     restart: unless-stopped

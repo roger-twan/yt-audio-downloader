@@ -74,6 +74,28 @@ Test Telegram from the running server:
 curl -X POST http://localhost:7777/telegram/test
 ```
 
+## Post-download Docker Command
+
+You can trigger a command in another container after each successful download. For example, to run the same command as:
+
+```bash
+docker exec navidrome navidrome scan
+```
+
+uncomment the Docker socket volume and set:
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+
+environment:
+  POST_DOWNLOAD_DOCKER_CONTAINER: navidrome
+  POST_DOWNLOAD_DOCKER_COMMAND: navidrome scan
+```
+
+The Docker socket gives this service control over the host Docker daemon, so only enable it on a trusted host.
+When this command is enabled, the Telegram notification is sent after the command finishes and includes the scan/sync result.
+
 ## Download Audio
 
 ```bash
@@ -119,6 +141,7 @@ curl http://localhost:7777/jobs
 
 When `title` is set, it replaces the title part of the saved filename and the file metadata title.
 The file metadata album is always set to `Audiobooks`.
+The file metadata album artist is always set to `Audiobook`.
 
 To download video instead of audio:
 

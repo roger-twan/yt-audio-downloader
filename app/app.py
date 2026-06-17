@@ -1,5 +1,9 @@
+import http.client
+import json
 import os
 import re
+import shlex
+import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -24,6 +28,9 @@ YTDLP_PROXY = os.getenv("YTDLP_PROXY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY") or YTDLP_PROXY
+DOCKER_SOCKET = os.getenv("DOCKER_SOCKET", "/var/run/docker.sock")
+POST_DOWNLOAD_DOCKER_CONTAINER = os.getenv("POST_DOWNLOAD_DOCKER_CONTAINER")
+POST_DOWNLOAD_DOCKER_COMMAND = os.getenv("POST_DOWNLOAD_DOCKER_COMMAND")
 
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 jobs: dict[str, dict[str, Any]] = {}
@@ -69,6 +76,14 @@ def sanitize_title(value: Any) -> str | None:
     return cleaned[:120]
 
 
+def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(payload)
+    for key in ("api_token", "token", "authorization", "Authorization"):
+        if key in redacted:
+            redacted[key] = "[redacted]"
+    return redacted
+
+
 def telegram_enabled() -> bool:
     return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 
@@ -105,6 +120,138 @@ def send_telegram_message(text: str) -> dict[str, Any]:
             return {"enabled": True, "status": resp.status}
     except urlerror.URLError as exc:
         return {"enabled": True, "error": str(exc)}
+
+
+class DockerUnixConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: int = 120):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
+def docker_api_request(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: int = 120,
+) -> tuple[int, bytes]:
+    payload = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    conn = DockerUnixConnection(DOCKER_SOCKET, timeout=timeout)
+
+    try:
+        conn.request(method, path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        return resp.status, data
+    finally:
+        conn.close()
+
+
+def parse_docker_exec_output(data: bytes) -> dict[str, str]:
+    if not data:
+        return {"stdout": "", "stderr": ""}
+
+    stdout = bytearray()
+    stderr = bytearray()
+    index = 0
+    while index + 8 <= len(data):
+        stream_type = data[index]
+        size = int.from_bytes(data[index + 4 : index + 8], "big")
+        index += 8
+        chunk = data[index : index + size]
+        index += size
+
+        if stream_type == 2:
+            stderr.extend(chunk)
+        else:
+            stdout.extend(chunk)
+
+    if index < len(data) and not stdout and not stderr:
+        stdout.extend(data[index:])
+
+    return {
+        "stdout": stdout.decode("utf-8", errors="replace")[-4000:],
+        "stderr": stderr.decode("utf-8", errors="replace")[-4000:],
+    }
+
+
+def trigger_post_download_docker_command() -> dict[str, Any]:
+    try:
+        if not POST_DOWNLOAD_DOCKER_CONTAINER or not POST_DOWNLOAD_DOCKER_COMMAND:
+            return {"enabled": False}
+
+        if not Path(DOCKER_SOCKET).exists():
+            return {"enabled": True, "error": f"Docker socket not found: {DOCKER_SOCKET}"}
+
+        command = shlex.split(POST_DOWNLOAD_DOCKER_COMMAND)
+        if not command:
+            return {"enabled": True, "error": "POST_DOWNLOAD_DOCKER_COMMAND is empty."}
+
+        container = parse.quote(POST_DOWNLOAD_DOCKER_CONTAINER, safe="")
+        status, data = docker_api_request(
+            "POST",
+            f"/containers/{container}/exec",
+            {
+                "AttachStdout": True,
+                "AttachStderr": True,
+                "Cmd": command,
+            },
+        )
+        if status >= 300:
+            return {
+                "enabled": True,
+                "status": status,
+                "error": data.decode("utf-8", errors="replace"),
+            }
+
+        exec_id = json.loads(data.decode("utf-8"))["Id"]
+        status, output = docker_api_request(
+            "POST",
+            f"/exec/{exec_id}/start",
+            {
+                "Detach": False,
+                "Tty": False,
+            },
+        )
+        result: dict[str, Any] = {
+            "enabled": True,
+            "container": POST_DOWNLOAD_DOCKER_CONTAINER,
+            "command": command,
+            "status": status,
+            **parse_docker_exec_output(output),
+        }
+        if status >= 300:
+            result["error"] = output.decode("utf-8", errors="replace")
+            return result
+
+        inspect_status, inspect_data = docker_api_request("GET", f"/exec/{exec_id}/json")
+        if inspect_status < 300:
+            result["exit_code"] = json.loads(inspect_data.decode("utf-8")).get("ExitCode")
+
+        return result
+    except Exception as exc:
+        return {"enabled": True, "error": str(exc)}
+
+
+def build_telegram_message(title: str | None, post_download_command: dict[str, Any]) -> str:
+    media = title or "media"
+    if not post_download_command.get("enabled"):
+        return f"Audio saved: {media}"
+
+    if post_download_command.get("exit_code") == 0:
+        return f"Audio saved and scan/sync completed: {media}"
+
+    error = post_download_command.get("error") or post_download_command.get("stderr")
+    if error:
+        return f"Audio saved, but scan/sync failed: {media}\n{str(error).strip()[-500:]}"
+
+    return f"Audio saved, but scan/sync did not complete cleanly: {media}"
 
 
 def progress_hook(job_id: str):
@@ -155,11 +302,16 @@ def build_ydl_options(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "ignoreerrors": False,
         "progress_hooks": [progress_hook(job_id)],
         "postprocessor_args": {
-            "FFmpegMetadata": ["-metadata", "album=Audiobooks"],
+            "metadata+ffmpeg_o": [
+                "-metadata",
+                "album=Audiobooks",
+                "-metadata",
+                "album_artist=Audiobook",
+            ],
         },
     }
     if custom_title:
-        options["postprocessor_args"]["FFmpegMetadata"].extend(
+        options["postprocessor_args"]["metadata+ffmpeg_o"].extend(
             ["-metadata", f"title={custom_title}"]
         )
 
@@ -212,7 +364,10 @@ def run_download(job_id: str, payload: dict[str, Any]) -> None:
             title = custom_title
             webpage_url = url
 
-        telegram_result = send_telegram_message(f"Audio saved: {title or webpage_url}")
+        post_download_command = trigger_post_download_docker_command()
+        telegram_result = send_telegram_message(
+            build_telegram_message(title or webpage_url, post_download_command)
+        )
 
         update_job(
             job_id,
@@ -222,6 +377,7 @@ def run_download(job_id: str, payload: dict[str, Any]) -> None:
             url=webpage_url,
             download_dir=str(DOWNLOAD_DIR),
             telegram=telegram_result,
+            post_download_command=post_download_command,
             completed_at=utc_now(),
             progress="100%",
         )
@@ -255,6 +411,10 @@ def download():
 
     job_id = uuid.uuid4().hex
     now = utc_now()
+    print(
+        f"Download request body: {json.dumps(redact_payload(payload), ensure_ascii=False)}",
+        flush=True,
+    )
 
     with jobs_lock:
         jobs[job_id] = {
